@@ -47,6 +47,30 @@ fn word_pixels(s: &Session, id: pdfcraft_engine::DocId) -> Vec<[u8; 3]> {
     px
 }
 
+/// Dhivehi read by Tesseract goes into the Unicode text layer and is extracted (search, copy) in
+/// typing order: a right-to-left line, its first word on the right, beside a Latin word.
+#[test]
+fn a_dhivehi_ocr_layer_reads_back_in_typing_order() {
+    let word = |text: &str, x: f64, w: f64| PlacedWord { text: text.into(), origin: [x, 40.0], across: [w, 0.0], up: [0.0, 20.0] };
+    let (s, id) = scanned_with(vec![word("ދިވެހި", 120.0, 60.0), word("ބަސް", 60.0, 50.0), word("PDF", 10.0, 40.0)]);
+    let doc = s.get(id).unwrap();
+    let out = PageRenderer::new(doc.bytes.clone(), Default::default()).render(RenderRequest {
+        page: 0,
+        kind: pdfcraft_render::RequestKind::Text,
+        scale: 1.0,
+        ..Default::default()
+    });
+    let text = out.text.expect("page text").plain_text();
+    assert!(text.contains("ދިވެހި ބަސް"), "{text:?}");
+    assert!(text.contains("PDF"), "{text:?}");
+    // The saved file holds the Unicode font with its /ToUnicode map, and no font program.
+    let bytes = String::from_utf8_lossy(&doc.bytes).into_owned();
+    assert!(
+        bytes.contains("/PCOcrU") && bytes.contains("/PdfCraftOcrUnicode") && !bytes.contains("/FontFile"),
+        "the Unicode OCR font is on the page"
+    );
+}
+
 fn near(a: [u8; 3], b: [u8; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 24)
 }

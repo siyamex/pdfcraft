@@ -295,6 +295,57 @@ fn contents(doc: &mut Document, page: &pdfcraft_model::Page) -> Result<Vec<Objec
     })
 }
 
+/// The invisible Unicode font of OCR text layers (`pdfcraft_ocr::UNICODE_FONT`).
+const UNICODE_OCR_FONT: &[u8] = b"PCOcrU";
+
+/// A Type 0 font whose 2-byte codes are UCS-2 values, for invisible OCR text in scripts
+/// Helvetica can't hold (Thaana). No font program: the text is never drawn. Its `/ToUnicode` maps
+/// each code to itself, in 256-code ranges that keep the high byte fixed (ISO 32000-2 §9.10.3).
+fn unicode_ocr_font(doc: &mut Document) -> Object {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /PCOcrU-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in (0u32..256).collect::<Vec<_>>().chunks(100) {
+        cmap.push_str(&format!("{} beginbfrange\n", chunk.len()));
+        for hi in chunk {
+            cmap.push_str(&format!("<{hi:02X}00> <{hi:02X}FF> <{hi:02X}00>\n"));
+        }
+        cmap.push_str("endbfrange\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    let to_unicode = doc.add(Object::Stream(pdfcraft_cos::Stream::flate(Dict::new(), cmap.as_bytes())));
+    let mut descriptor = Dict::new();
+    descriptor.set(b"Type".to_vec(), Object::name("FontDescriptor"));
+    descriptor.set(b"FontName".to_vec(), Object::name("PdfCraftOcrUnicode"));
+    descriptor.set(b"Flags".to_vec(), Object::Int(4));
+    descriptor.set(b"FontBBox".to_vec(), Object::Array([0, -210, 500, 720].map(Object::Int).to_vec()));
+    descriptor.set(b"ItalicAngle".to_vec(), Object::Int(0));
+    descriptor.set(b"Ascent".to_vec(), Object::Int(720));
+    descriptor.set(b"Descent".to_vec(), Object::Int(-210));
+    descriptor.set(b"CapHeight".to_vec(), Object::Int(720));
+    descriptor.set(b"StemV".to_vec(), Object::Int(80));
+    let mut system = Dict::new();
+    system.set(b"Registry".to_vec(), Object::String(pdfcraft_cos::PdfString::literal(b"Adobe".to_vec())));
+    system.set(b"Ordering".to_vec(), Object::String(pdfcraft_cos::PdfString::literal(b"Identity".to_vec())));
+    system.set(b"Supplement".to_vec(), Object::Int(0));
+    let mut cid = Dict::new();
+    cid.set(b"Type".to_vec(), Object::name("Font"));
+    cid.set(b"Subtype".to_vec(), Object::name("CIDFontType2"));
+    cid.set(b"BaseFont".to_vec(), Object::name("PdfCraftOcrUnicode"));
+    cid.set(b"CIDSystemInfo".to_vec(), Object::Dict(system));
+    cid.set(b"FontDescriptor".to_vec(), Object::Ref(doc.add(Object::Dict(descriptor))));
+    cid.set(b"DW".to_vec(), Object::Int(500));
+    let mut top = Dict::new();
+    top.set(b"Type".to_vec(), Object::name("Font"));
+    top.set(b"Subtype".to_vec(), Object::name("Type0"));
+    top.set(b"BaseFont".to_vec(), Object::name("PdfCraftOcrUnicode"));
+    top.set(b"Encoding".to_vec(), Object::name("Identity-H"));
+    top.set(b"DescendantFonts".to_vec(), Object::Array(vec![Object::Ref(doc.add(Object::Dict(cid)))]));
+    top.set(b"ToUnicode".to_vec(), Object::Ref(to_unicode));
+    Object::Ref(doc.add(Object::Dict(top)))
+}
+
 /// Add the font (and an opacity state) to the page's own resources.
 fn add_resources(doc: &mut Document, page: &pdfcraft_model::Page, opacity: Option<f64>, content: Option<&[u8]>) -> Result<(), EditError> {
     let mut res = page.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
@@ -310,6 +361,10 @@ fn add_resources(doc: &mut Document, page: &pdfcraft_model::Page, opacity: Optio
         font.set(b"BaseFont".to_vec(), Object::name(base));
         font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
         fonts.set(name.to_vec(), Object::Dict(font));
+    }
+    if content.is_some_and(|c| c.windows(UNICODE_OCR_FONT.len() + 1).any(|w| w[0] == b'/' && &w[1..] == UNICODE_OCR_FONT)) {
+        let font = unicode_ocr_font(doc);
+        fonts.set(UNICODE_OCR_FONT.to_vec(), font);
     }
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     if let Some(o) = opacity {
